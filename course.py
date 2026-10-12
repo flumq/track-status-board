@@ -1,3 +1,4 @@
+import base64
 import io
 
 import numpy as np
@@ -15,7 +16,6 @@ st.set_page_config(
 )
 
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
-st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 지도 옆 범례에 실시간으로 반영됩니다.")
 
 # ─────────────────────────────────────────────
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
@@ -159,6 +159,10 @@ legend_size = st.sidebar.slider(
 img_scale = st.sidebar.slider(
     "지도 표시 크기 배율", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
     help="1.0 = 원본 해상도 그대로, 2.0 = 2배 확대 표시",
+)
+fit_height = st.sidebar.slider(
+    "지도 최대 높이 (화면 높이 %)", min_value=40, max_value=100, value=70, step=5,
+    help="도면이 화면보다 길게 나오면 값을 낮추세요. 100이면 브라우저 창 높이 전체를 사용합니다.",
 )
 
 # ─────────────────────────────────────────────
@@ -321,8 +325,34 @@ except FileNotFoundError as e:
 # ─────────────────────────────────────────────
 # 6. 결과 화면 출력
 # ─────────────────────────────────────────────
+buf = io.BytesIO()
+current_canvas.save(buf, format="PNG")
+png_bytes = buf.getvalue()
+b64 = base64.b64encode(png_bytes).decode()
+
+# 도면을 먼저, 한 화면에 들어오도록 높이 제한
+st.markdown(
+    f"""
+    <div style="text-align:center;">
+        <img src="data:image/png;base64,{b64}"
+             style="max-width:100%; max-height:{fit_height}vh;
+                    width:auto; height:auto; object-fit:contain;
+                    border:1px solid #ddd; border-radius:6px;">
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.download_button(
+    label="🖼️ 현재 현황판 이미지 다운로드 (PNG)",
+    data=png_bytes,
+    file_name="test_track_status.png",
+    mime="image/png",
+)
+
 st.markdown("---")
 
+# 안내 메시지는 도면 아래에 표시
 if size_error_courses:
     st.error(
         "⚠️ 아래 코스 이미지가 지도와 크기가 달라 표시에서 제외되었습니다. "
@@ -337,14 +367,3 @@ else:
 
 if np.any(overlap_tracker > 1):
     st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색상만 표시됩니다.")
-
-st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판", use_container_width=True)
-
-buf = io.BytesIO()
-current_canvas.save(buf, format="PNG")
-st.download_button(
-    label="🖼️ 현재 현황판 이미지 다운로드 (PNG)",
-    data=buf.getvalue(),
-    file_name="test_track_status.png",
-    mime="image/png",
-)
