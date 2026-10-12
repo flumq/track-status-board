@@ -155,39 +155,33 @@ try:
     current_canvas = Image.fromarray(canvas_arr)
 
     # ─────────────────────────────────────────────
-    # [개선] 지도 이미지 '내부' 우측 상단 빈 공간에 선명한 오버레이 범례 그리기
+    # 지도 이미지 '내부' 우측 상단 빈 공간에 선명한 오버레이 범례 그리기
     # ─────────────────────────────────────────────
     draw = ImageDraw.Draw(current_canvas)
     
-    # 해상도가 높으므로 폰트 크기를 키워서 가독성 확보 (제목 32px, 항목 24px)
     font_title = get_font(32)
     font_item = get_font(26)
 
-    # 도면 내부 우측 상단 여백에 위치하도록 좌표 재설정 (이미지 폭/높이 기준)
     box_w = 420
     box_h = 90 + (len(team_colors) * 52)
-    box_x = base_width - box_w - 40  # 우측 여백에서 안쪽으로 배치
-    box_y = 40                       # 상단 여백에서 배치
+    box_x = base_width - box_w - 40  
+    box_y = 40                       
 
-    # 1) 가독성을 위한 깔끔한 배경 박스 및 테두리 (약간 투명한 느낌 대신 깔끔한 흰색 + 그림자 느낌 테두리)
+    # 배경 박스 및 테두리
     draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=(255, 255, 255), outline=(150, 150, 150), width=3)
 
-    # 2) 범례 제목
+    # 범례 제목
     draw.text((box_x + 24, box_y + 20), "🏁 팀별 주행 코스 현황", fill=(20, 20, 20), font=font_title)
     
     # 구분선
     draw.line([box_x + 20, box_y + 70, box_x + box_w - 20, box_y + 70], fill=(200, 200, 200), width=2)
 
-    # 3) 각 팀별 색상칩 및 코스 표시
+    # 각 팀별 색상칩 및 코스 표시
     current_y = box_y + 85
     for team, color in team_colors.items():
-        # 컬러 박스 (크기 확대)
         draw.rectangle([box_x + 24, current_y + 6, box_x + 54, current_y + 36], fill=color, outline=(80, 80, 80), width=1)
-        
-        # 팀 이름
         draw.text((box_x + 70, current_y), team, fill=(20, 20, 20), font=font_item)
         
-        # 해당 팀 코스 목록
         assigned_courses = team_assignments.get(team, [])
         if assigned_courses:
             course_str = ", ".join(assigned_courses)
@@ -196,14 +190,10 @@ try:
         else:
             course_str = "미배정"
 
-        # 코스 텍스트
         draw.text((box_x + 180, current_y), f": {course_str}", fill=(80, 80, 80), font=font_item)
         
-        current_y + = 52
+        current_y += 52
 
-    # ─────────────────────────────────────────────
-    # 앙티알리아싱(LANCZOS)을 활용한 고해상도 리사이즈
-    # ─────────────────────────────────────────────
     if img_scale != 1.0:
         new_size = (int(base_width * img_scale), int(base_height * img_scale))
         current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
@@ -232,10 +222,8 @@ else:
 if np.any(overlap_tracker > 1):
     st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색상만 표시됩니다.")
 
-# 고화질 출력을 위한 렌더링 (Streamlit 폭 맞춤 + 고품질)
 st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판", use_container_width=True)
 
-# 원본 해상도 PNG 다운로드 버튼
 buf = io.BytesIO()
 current_canvas.save(buf, format="PNG")
 st.download_button(
