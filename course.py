@@ -29,7 +29,6 @@ team_colors = {
     "공사 및 작업": (255, 110, 0),   # 비비드 오렌지
 }
 
-# 코스별 이미지 파일명 매핑
 course_files = {
     "A코스": "A코스-8.png",
     "B코스": "B코스-8.png",
@@ -46,8 +45,7 @@ course_files = {
     "시가지": "시가지.png",
 }
 
-# 저장소에 함께 올린 한글 폰트 파일명
-FONT_PATH = "NanumGothicBold.ttf"
+FONT_PATH = "NanumGothicBold.ttf"   # 저장소에 올린 한글 폰트 파일명
 
 
 # ─────────────────────────────────────────────
@@ -76,15 +74,30 @@ def load_course_mask(path: str, base_size: tuple):
     return mask, img.size
 
 
+@st.cache_data
+def find_content_bbox(path: str):
+    """지도 내용이 있는 영역(흰 배경 제외)의 경계 상자를 찾는다.
+    캔버스 가장자리의 얇은 테두리선은 무시하기 위해 가장자리 일부를 제외하고 탐색."""
+    arr, (w, h) = load_base_map(path)
+    edge = max(4, int(min(w, h) * 0.01))
+    inner = arr[edge:h - edge, edge:w - edge]
+    nonwhite = inner.min(axis=2) < 235
+    ys, xs = np.where(nonwhite)
+    if len(xs) == 0:
+        return 0, 0, w, h
+    x0, x1 = xs.min() + edge, xs.max() + edge + 1
+    y0, y1 = ys.min() + edge, ys.max() + edge + 1
+    return int(x0), int(y0), int(x1), int(y1)
+
+
 @st.cache_resource
 def get_font(size: int):
-    """한글 지원 폰트를 우선순위대로 탐색"""
     candidates = [
-        FONT_PATH,                                                  # 저장소에 포함한 폰트
-        "malgunbd.ttf",                                             # Windows
-        "malgun.ttf",                                               # Windows
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",               # Mac
-        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",      # Linux (nanum 설치 시)
+        FONT_PATH,
+        "malgunbd.ttf",
+        "malgun.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     ]
     for p in candidates:
@@ -124,6 +137,10 @@ st.sidebar.markdown("---")
 thick_line = st.sidebar.checkbox(
     "선 두껍게 표시 (확대 시 가독성 향상)", value=True
 )
+auto_crop = st.sidebar.checkbox(
+    "지도 여백 자동 자르기 (지도+범례 한눈에 보기)", value=True
+)
+legend_pos = st.sidebar.selectbox("범례 위치", ["우하단", "우상단"], index=0)
 img_scale = st.sidebar.slider(
     "지도 표시 크기 배율", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
     help="1.0 = 원본 해상도 그대로, 2.0 = 2배 확대 표시",
@@ -164,35 +181,75 @@ try:
             overlap_tracker[mask] += 1
             canvas_arr[mask] = team_color
 
-    # ── 1) 먼저 지도를 목표 배율로 리사이즈 ──
     current_canvas = Image.fromarray(canvas_arr)
+
+    # ── 1) 지도 여백 자르기 (지도 영역 + 약간의 여백) ──
+    if auto_crop:
+        x0, y0, x1, y1 = find_content_bbox("blank_map.png")
+        m = int(max(x1 - x0, y1 - y0) * 0.03)
+        x0 = max(0, x0 - m)
+        y0 = max(0, y0 - m)
+        x1 = min(base_width, x1 + m)
+        y1 = min(base_height, y1 + m)
+        current_canvas = current_canvas.crop((x0, y0, x1, y1))
+
+    # ── 2) 목표 배율로 리사이즈 (범례는 이후에 그려서 선명하게 유지) ──
     if img_scale != 1.0:
-        new_size = (int(base_width * img_scale), int(base_height * img_scale))
-        current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
+        cw, ch = current_canvas.size
+        current_canvas = current_canvas.resize(
+            (int(cw * img_scale), int(ch * img_scale)), Image.LANCZOS
+        )
 
-    W, H = current_canvas.size
+    map_w, map_h = current_canvas.size
 
-    # ── 2) 리사이즈된 지도 위에 범례를 고해상도 RGBA 레이어로 그림 ──
-    unit = max(14, int(W * 0.018))          # 지도 폭 기준 기본 글자 단위
+    # ── 3) 범례 크기 계산 (지도 폭 기준 비례) ──
+    SS = 2  # 슈퍼샘플링 배수
+    unit = max(14, int(map_w * 0.03))
+    f_title = get_font(int(unit * 1.25) * SS)
+    f_item = get_font(unit * SS)
+
+    tmp = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+
+    def text_w(txt, font):
+        return tmp.textlength(txt, font=font) / SS
+
     row_h = int(unit * 1.9)
     pad = int(unit * 0.9)
     chip = int(unit * 1.2)
-    box_w = int(unit * 17)
-    box_h = pad * 2 + int(unit * 2.4) + row_h * len(team_colors)
-    box_x = W - box_w - int(unit * 1.5)
-    box_y = int(unit * 1.5)
 
-    # 2배 슈퍼샘플링으로 그린 뒤 축소 → 안티앨리어싱으로 선명하게
-    SS = 2
+    # 팀 이름 중 가장 긴 폭 → 코스 열 위치 자동 결정 (겹침 방지)
+    max_name_w = max(text_w(t, f_item) for t in team_colors)
+    name_x_1x = pad + chip + unit * 0.6
+    course_x_1x = name_x_1x + max_name_w + unit * 0.8
+
+    MAX_CHARS = 10
+    course_w = text_w("가" * MAX_CHARS, f_item)  # 한글 전각 폭 기준 최대 폭
+
+    box_w = int(course_x_1x + course_w + pad)
+    box_h = pad * 2 + int(unit * 2.4) + row_h * len(team_colors)
+
+    # ── 4) 캔버스 오른쪽에 범례 자리 확보 (지도를 가리지 않도록) ──
+    margin = int(unit * 1.5)
+    if auto_crop:
+        full_w = map_w + box_w + margin * 2
+        full_h = max(map_h, box_h + margin * 2)
+        bg = Image.new("RGB", (full_w, full_h), (255, 255, 255))
+        bg.paste(current_canvas, (0, 0))
+        current_canvas = bg
+    else:
+        full_w, full_h = map_w, map_h
+
+    box_x = full_w - box_w - margin
+    box_y = margin if legend_pos == "우상단" else full_h - box_h - margin
+
+    # ── 5) 범례 레이어 그리기 ──
     layer = Image.new("RGBA", (box_w * SS, box_h * SS), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    f_title = get_font(int(unit * 1.25) * SS)
-    f_item = get_font(unit * SS)
 
     d.rounded_rectangle(
         [0, 0, box_w * SS - 1, box_h * SS - 1],
         radius=12 * SS,
-        fill=(255, 255, 255, 235),
+        fill=(255, 255, 255, 240),
         outline=(120, 120, 120, 255),
         width=2 * SS,
     )
@@ -206,8 +263,8 @@ try:
     )
 
     y = line_y + int(unit * 0.5) * SS
-    name_x = (pad + chip + int(unit * 0.6)) * SS
-    course_x = (pad + chip + int(unit * 5.2)) * SS
+    name_x = int(name_x_1x * SS)
+    course_x = int(course_x_1x * SS)
 
     for team, color in team_colors.items():
         d.rectangle(
@@ -226,8 +283,8 @@ try:
         assigned = team_assignments.get(team, [])
         if assigned:
             course_str = ", ".join(assigned)
-            if len(course_str) > 9:
-                course_str = course_str[:8] + "…"
+            if len(course_str) > MAX_CHARS:
+                course_str = course_str[:MAX_CHARS - 1] + "…"
             txt_color = (30, 30, 30, 255)
         else:
             course_str = "미배정"
@@ -238,7 +295,6 @@ try:
 
     layer = layer.resize((box_w, box_h), Image.LANCZOS)
 
-    # RGBA 합성 후 다시 RGB로
     current_canvas = current_canvas.convert("RGBA")
     current_canvas.alpha_composite(layer, (box_x, box_y))
     current_canvas = current_canvas.convert("RGB")
