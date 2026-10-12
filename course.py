@@ -17,21 +17,23 @@ st.set_page_config(
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
 st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 지도 내부 오버레이 범례에 실시간으로 반영됩니다.")
 
+# ─────────────────────────────────────────────
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
+# ─────────────────────────────────────────────
 team_colors = {
-    "Team 1": (0, 102, 204),    # 파란색
-    "Team 2": (220, 50, 50),    # 빨간색
-    "Team 3": (240, 180, 0),    # 노란색
-    "Team 4": (46, 139, 87),    # 초록색
-    "Team 5": (138, 43, 226),   # 보라색
-    "공사 및 작업": (255, 110, 0)     # 비비드 오렌지
+    "Team 1": (0, 102, 204),        # 파란색
+    "Team 2": (220, 50, 50),        # 빨간색
+    "Team 3": (240, 180, 0),        # 노란색
+    "Team 4": (46, 139, 87),        # 초록색
+    "Team 5": (138, 43, 226),       # 보라색
+    "공사 및 작업": (255, 110, 0),   # 비비드 오렌지
 }
 
 # 코스별 이미지 파일명 매핑
 course_files = {
     "A코스": "A코스-8.png",
     "B코스": "B코스-8.png",
-    "변형B코스": "변형B코스.png",    
+    "변형B코스": "변형B코스.png",
     "C코스": "C코스-8.png",
     "D코스": "D코스-8.png",
     "E코스": "E코스-8.png",
@@ -41,22 +43,27 @@ course_files = {
     "곡선코스": "곡선코스.png",
     "위험회피": "위험회피.png",
     "소방-1": "소방01.png",
-    "시가지": "시가지.png"
+    "시가지": "시가지.png",
 }
 
+# 저장소에 함께 올린 한글 폰트 파일명
+FONT_PATH = "NanumGothicBold.ttf"
+
+
 # ─────────────────────────────────────────────
-# 3. 이미지 로딩 캐싱
+# 3. 이미지/폰트 로딩 캐싱
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_base_map(path: str):
     img = Image.open(path).convert("RGB")
     return np.array(img), img.size  # (arr, (w, h))
 
+
 @st.cache_data
 def load_course_mask(path: str, base_size: tuple):
     img = Image.open(path).convert("RGBA")
     if img.size != base_size:
-        return None, img.size  
+        return None, img.size
 
     arr = np.array(img)
     alpha = arr[:, :, 3]
@@ -68,20 +75,25 @@ def load_course_mask(path: str, base_size: tuple):
     )
     return mask, img.size
 
-# 고해상도 출력을 위한 폰트 로드 함수
+
 @st.cache_resource
 def get_font(size: int):
-    import platform
-    system = platform.system()
-    try:
-        if system == "Windows":
-            return ImageFont.truetype("malgun.ttf", size)
-        elif system == "Darwin": # Mac
-            return ImageFont.truetype("AppleGothic", size)
-        else: # Linux / Streamlit Cloud 등
-            return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
-    except IOError:
-        return ImageFont.load_default()
+    """한글 지원 폰트를 우선순위대로 탐색"""
+    candidates = [
+        FONT_PATH,                                                  # 저장소에 포함한 폰트
+        "malgunbd.ttf",                                             # Windows
+        "malgun.ttf",                                               # Windows
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",               # Mac
+        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",      # Linux (nanum 설치 시)
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    ]
+    for p in candidates:
+        try:
+            return ImageFont.truetype(p, size)
+        except (IOError, OSError):
+            continue
+    return ImageFont.load_default()
+
 
 # ─────────────────────────────────────────────
 # 4. 사이드바 UI
@@ -122,7 +134,7 @@ img_scale = st.sidebar.slider(
 # ─────────────────────────────────────────────
 try:
     canvas_arr, (base_width, base_height) = load_base_map("blank_map.png")
-    canvas_arr = canvas_arr.copy()  
+    canvas_arr = canvas_arr.copy()
 
     active_summary = []
     overlap_tracker = np.zeros((base_height, base_width), dtype=np.uint8)
@@ -152,51 +164,84 @@ try:
             overlap_tracker[mask] += 1
             canvas_arr[mask] = team_color
 
+    # ── 1) 먼저 지도를 목표 배율로 리사이즈 ──
     current_canvas = Image.fromarray(canvas_arr)
-
-    # ─────────────────────────────────────────────
-    # 지도 이미지 '내부' 우측 상단 빈 공간에 선명한 오버레이 범례 그리기
-    # ─────────────────────────────────────────────
-    draw = ImageDraw.Draw(current_canvas)
-    
-    font_title = get_font(32)
-    font_item = get_font(26)
-
-    box_w = 420
-    box_h = 90 + (len(team_colors) * 52)
-    box_x = base_width - box_w - 40  
-    box_y = 40                       
-
-    # 배경 박스 및 테두리
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=(255, 255, 255), outline=(150, 150, 150), width=3)
-
-    # 범례 제목
-    draw.text((box_x + 24, box_y + 20), "🏁 팀별 주행 코스 현황", fill=(20, 20, 20), font=font_title)
-    
-    # 구분선
-    draw.line([box_x + 20, box_y + 70, box_x + box_w - 20, box_y + 70], fill=(200, 200, 200), width=2)
-
-    # 각 팀별 색상칩 및 코스 표시
-    current_y = box_y + 85
-    for team, color in team_colors.items():
-        draw.rectangle([box_x + 24, current_y + 6, box_x + 54, current_y + 36], fill=color, outline=(80, 80, 80), width=1)
-        draw.text((box_x + 70, current_y), team, fill=(20, 20, 20), font=font_item)
-        
-        assigned_courses = team_assignments.get(team, [])
-        if assigned_courses:
-            course_str = ", ".join(assigned_courses)
-            if len(course_str) > 15:
-                course_str = course_str[:14] + "..."
-        else:
-            course_str = "미배정"
-
-        draw.text((box_x + 180, current_y), f": {course_str}", fill=(80, 80, 80), font=font_item)
-        
-        current_y += 52
-
     if img_scale != 1.0:
         new_size = (int(base_width * img_scale), int(base_height * img_scale))
         current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
+
+    W, H = current_canvas.size
+
+    # ── 2) 리사이즈된 지도 위에 범례를 고해상도 RGBA 레이어로 그림 ──
+    unit = max(14, int(W * 0.018))          # 지도 폭 기준 기본 글자 단위
+    row_h = int(unit * 1.9)
+    pad = int(unit * 0.9)
+    chip = int(unit * 1.2)
+    box_w = int(unit * 17)
+    box_h = pad * 2 + int(unit * 2.4) + row_h * len(team_colors)
+    box_x = W - box_w - int(unit * 1.5)
+    box_y = int(unit * 1.5)
+
+    # 2배 슈퍼샘플링으로 그린 뒤 축소 → 안티앨리어싱으로 선명하게
+    SS = 2
+    layer = Image.new("RGBA", (box_w * SS, box_h * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    f_title = get_font(int(unit * 1.25) * SS)
+    f_item = get_font(unit * SS)
+
+    d.rounded_rectangle(
+        [0, 0, box_w * SS - 1, box_h * SS - 1],
+        radius=12 * SS,
+        fill=(255, 255, 255, 235),
+        outline=(120, 120, 120, 255),
+        width=2 * SS,
+    )
+    d.text((pad * SS, pad * SS), "팀별 주행 코스 현황", fill=(20, 20, 20, 255), font=f_title)
+
+    line_y = (pad + int(unit * 1.9)) * SS
+    d.line(
+        [pad * SS, line_y, (box_w - pad) * SS, line_y],
+        fill=(190, 190, 190, 255),
+        width=2 * SS,
+    )
+
+    y = line_y + int(unit * 0.5) * SS
+    name_x = (pad + chip + int(unit * 0.6)) * SS
+    course_x = (pad + chip + int(unit * 5.2)) * SS
+
+    for team, color in team_colors.items():
+        d.rectangle(
+            [
+                pad * SS,
+                y + int(unit * 0.15) * SS,
+                (pad + chip) * SS,
+                y + (int(unit * 0.15) + chip) * SS,
+            ],
+            fill=color + (255,),
+            outline=(60, 60, 60, 255),
+            width=SS,
+        )
+        d.text((name_x, y), team, fill=(20, 20, 20, 255), font=f_item)
+
+        assigned = team_assignments.get(team, [])
+        if assigned:
+            course_str = ", ".join(assigned)
+            if len(course_str) > 9:
+                course_str = course_str[:8] + "…"
+            txt_color = (30, 30, 30, 255)
+        else:
+            course_str = "미배정"
+            txt_color = (150, 150, 150, 255)
+        d.text((course_x, y), course_str, fill=txt_color, font=f_item)
+
+        y += row_h * SS
+
+    layer = layer.resize((box_w, box_h), Image.LANCZOS)
+
+    # RGBA 합성 후 다시 RGB로
+    current_canvas = current_canvas.convert("RGBA")
+    current_canvas.alpha_composite(layer, (box_x, box_y))
+    current_canvas = current_canvas.convert("RGB")
 
 except FileNotFoundError as e:
     st.error(f"이미지 파일을 찾을 수 없습니다: {e}. 폴더 안에 파일들이 있는지 확인해주세요.")
