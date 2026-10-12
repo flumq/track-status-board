@@ -3,7 +3,7 @@ import io
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, binary_erosion
 
 # ─────────────────────────────────────────────
 # 1. 페이지 설정
@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
-st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 지도 내부 오버레이 범례에 실시간으로 반영됩니다.")
+st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 지도 옆 범례에 실시간으로 반영됩니다.")
 
 # ─────────────────────────────────────────────
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
@@ -76,18 +76,29 @@ def load_course_mask(path: str, base_size: tuple):
 
 @st.cache_data
 def find_content_bbox(path: str):
-    """지도 내용이 있는 영역(흰 배경 제외)의 경계 상자를 찾는다.
-    캔버스 가장자리의 얇은 테두리선은 무시하기 위해 가장자리 일부를 제외하고 탐색."""
+    """도면 본체의 경계 상자를 찾는다.
+    캔버스 테두리선 같은 '얇은 선'은 침식(erosion)으로 제거하고,
+    두께가 있는 도면 본체만 남겨서 영역을 계산한다."""
     arr, (w, h) = load_base_map(path)
-    edge = max(4, int(min(w, h) * 0.01))
-    inner = arr[edge:h - edge, edge:w - edge]
-    nonwhite = inner.min(axis=2) < 235
-    ys, xs = np.where(nonwhite)
-    if len(xs) == 0:
-        return 0, 0, w, h
-    x0, x1 = xs.min() + edge, xs.max() + edge + 1
-    y0, y1 = ys.min() + edge, ys.max() + edge + 1
-    return int(x0), int(y0), int(x1), int(y1)
+    nonwhite = arr.min(axis=2) < 235
+
+    k = max(5, int(min(w, h) * 0.006))          # 이 두께보다 얇은 선은 무시
+    eroded = binary_erosion(nonwhite, structure=np.ones((k, 1), dtype=bool))
+    eroded = binary_erosion(eroded, structure=np.ones((1, k), dtype=bool))
+
+    ys, xs = np.where(eroded)
+    if len(xs) == 0:                             # 실패 시 원본 기준으로 대체
+        ys, xs = np.where(nonwhite)
+        if len(xs) == 0:
+            return 0, 0, w, h
+        k = 0
+
+    pad = k // 2 + 1                             # 침식으로 줄어든 만큼 복원
+    x0 = max(0, int(xs.min()) - pad)
+    y0 = max(0, int(ys.min()) - pad)
+    x1 = min(w, int(xs.max()) + pad + 1)
+    y1 = min(h, int(ys.max()) + pad + 1)
+    return x0, y0, x1, y1
 
 
 @st.cache_resource
@@ -138,16 +149,20 @@ thick_line = st.sidebar.checkbox(
     "선 두껍게 표시 (확대 시 가독성 향상)", value=True
 )
 auto_crop = st.sidebar.checkbox(
-    "지도 여백 자동 자르기 (지도+범례 한눈에 보기)", value=True
+    "지도 여백 자동 자르기 (지도 크게 보기)", value=True
 )
 legend_pos = st.sidebar.selectbox("범례 위치", ["우하단", "우상단"], index=0)
+legend_size = st.sidebar.slider(
+    "범례 크기", min_value=0.015, max_value=0.040, value=0.024, step=0.001,
+    help="값이 클수록 범례가 커집니다.",
+)
 img_scale = st.sidebar.slider(
     "지도 표시 크기 배율", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
     help="1.0 = 원본 해상도 그대로, 2.0 = 2배 확대 표시",
 )
 
 # ─────────────────────────────────────────────
-# 5. 배경 지도 + 코스 선 합성 및 오버레이 범례 그리기
+# 5. 배경 지도 + 코스 선 합성 및 범례 그리기
 # ─────────────────────────────────────────────
 try:
     canvas_arr, (base_width, base_height) = load_base_map("blank_map.png")
@@ -183,10 +198,10 @@ try:
 
     current_canvas = Image.fromarray(canvas_arr)
 
-    # ── 1) 지도 여백 자르기 (지도 영역 + 약간의 여백) ──
+    # ── 1) 지도 여백 자르기 (도면 + 아주 작은 여백) ──
     if auto_crop:
         x0, y0, x1, y1 = find_content_bbox("blank_map.png")
-        m = int(max(x1 - x0, y1 - y0) * 0.03)
+        m = int(max(x1 - x0, y1 - y0) * 0.02)
         x0 = max(0, x0 - m)
         y0 = max(0, y0 - m)
         x1 = min(base_width, x1 + m)
@@ -204,7 +219,7 @@ try:
 
     # ── 3) 범례 크기 계산 (지도 폭 기준 비례) ──
     SS = 2  # 슈퍼샘플링 배수
-    unit = max(14, int(map_w * 0.03))
+    unit = max(12, int(map_w * legend_size))
     f_title = get_font(int(unit * 1.25) * SS)
     f_item = get_font(unit * SS)
 
@@ -222,14 +237,14 @@ try:
     name_x_1x = pad + chip + unit * 0.6
     course_x_1x = name_x_1x + max_name_w + unit * 0.8
 
-    MAX_CHARS = 10
-    course_w = text_w("가" * MAX_CHARS, f_item)  # 한글 전각 폭 기준 최대 폭
+    MAX_CHARS = 8
+    course_w = text_w("가" * MAX_CHARS, f_item)
 
     box_w = int(course_x_1x + course_w + pad)
     box_h = pad * 2 + int(unit * 2.4) + row_h * len(team_colors)
 
     # ── 4) 캔버스 오른쪽에 범례 자리 확보 (지도를 가리지 않도록) ──
-    margin = int(unit * 1.5)
+    margin = int(unit * 1.0)
     if auto_crop:
         full_w = map_w + box_w + margin * 2
         full_h = max(map_h, box_h + margin * 2)
@@ -248,7 +263,7 @@ try:
 
     d.rounded_rectangle(
         [0, 0, box_w * SS - 1, box_h * SS - 1],
-        radius=12 * SS,
+        radius=10 * SS,
         fill=(255, 255, 255, 240),
         outline=(120, 120, 120, 255),
         width=2 * SS,
