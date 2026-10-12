@@ -2,12 +2,11 @@ import io
 
 import numpy as np
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import binary_dilation
 
 # ─────────────────────────────────────────────
 # 1. 페이지 설정
-#    layout="wide" 로 바꿔서 본문 폭 제한을 풀고, 지도를 훨씬 크게 표시합니다.
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="테스트 트랙 코스 현황판",
@@ -16,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
-st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 배경 지도 위에 팀 색상별 코스 화살표가 오버레이됩니다.")
+st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 배경 지도 및 도면 내 범례에 팀별 색상과 코스가 실시간으로 반영됩니다.")
 
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
 team_colors = {
@@ -45,25 +44,19 @@ course_files = {
     "시가지": "시가지.png"
 }
 
-
-
 # ─────────────────────────────────────────────
 # 3. 이미지 로딩 캐싱
-#    사이드바에서 옵션 하나만 바꿔도 매번 디스크 I/O가 발생하지 않도록
-#    st.cache_data로 파일별 numpy 배열을 캐싱합니다.
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_base_map(path: str):
     img = Image.open(path).convert("RGB")
     return np.array(img), img.size  # (arr, (w, h))
 
-
 @st.cache_data
 def load_course_mask(path: str, base_size: tuple):
-    """코스 PNG를 읽어 (라인 마스크, 이 코스 이미지의 크기)를 반환."""
     img = Image.open(path).convert("RGBA")
     if img.size != base_size:
-        return None, img.size  # 크기 불일치 → 호출부에서 에러 처리
+        return None, img.size  
 
     arr = np.array(img)
     alpha = arr[:, :, 3]
@@ -75,6 +68,22 @@ def load_course_mask(path: str, base_size: tuple):
     )
     return mask, img.size
 
+# 폰트 로드 함수 (시스템 폰트 활용 - 윈도우/리눅스 대응)
+@st.cache_resource
+def get_font(size: int):
+    # 환경에 따라 적절한 고딕 폰트 지정 (윈도우: malgun.gh, 리눅스: NanumGothic 또는 기본 폰트)
+    import platform
+    system = platform.system()
+    try:
+        if system == "Windows":
+            return ImageFont.truetype("malgun.ttf", size)
+        elif system == "Darwin": # Mac
+            return ImageFont.truetype("AppleGothic", size)
+        else: # Linux / Streamlit Cloud 등
+            return ImageFont.truetype("DejaVuSans.ttf", size)
+    except IOError:
+        # 폰트 로드 실패 시 기본 폰트 사용
+        return ImageFont.load_default()
 
 # ─────────────────────────────────────────────
 # 4. 사이드바 UI
@@ -111,11 +120,11 @@ img_scale = st.sidebar.slider(
 )
 
 # ─────────────────────────────────────────────
-# 5. 배경 지도 + 코스 선 합성
+# 5. 배경 지도 + 코스 선 합성 및 범례 그리기
 # ─────────────────────────────────────────────
 try:
     canvas_arr, (base_width, base_height) = load_base_map("blank_map.png")
-    canvas_arr = canvas_arr.copy()  # 캐시된 배열을 직접 수정하지 않도록 복사
+    canvas_arr = canvas_arr.copy()  
 
     active_summary = []
     overlap_tracker = np.zeros((base_height, base_width), dtype=np.uint8)
@@ -142,19 +151,67 @@ try:
             if thick_line:
                 mask = binary_dilation(mask, iterations=1)
 
-            # 여러 팀이 같은 구간을 겹쳐 주행하는 경우를 추적 (경고용)
             overlap_tracker[mask] += 1
-
             canvas_arr[mask] = team_color
 
     current_canvas = Image.fromarray(canvas_arr)
 
+    # ─────────────────────────────────────────────
+    # [추가 기능] 이미지 우측 빈 공간에 인라인 범례(Legend) 그리기
+    # ─────────────────────────────────────────────
+    draw = ImageDraw.Draw(current_canvas)
+    
+    # 폰트 사이즈 설정 (원본 이미지 해상도 기준, 예: 24~28px 적당)
+    font_large = get_font(26)
+    font_medium = get_font(20)
+
+    # 범례 박스 위치 설정 (도면 우측 상단 여백 공간 기준 좌표 설정 - 필요시 x, y 조정 가능)
+    # 이미지 전체 크기(base_width, base_height)에 맞춰 우측 상단 여백에 배치
+    box_x = base_width - 360  # 우측에서 360픽셀 안쪽부터 시작
+    box_y = 50                # 상단에서 50픽셀 아래부터 시작
+    box_w = 330
+    box_h = 70 + (len(team_colors) * 45) # 팀 개수에 따라 박스 높이 자동 조절
+
+    # 1) 반투명 혹은 흰색 배경 박스 및 테두리 그리기
+    # PIL에서 투명도를 주려면 별도 레이어를 써야 하므로 깔끔한 흰색 불투명 박스로 그립니다.
+    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=(255, 255, 255), outline=(200, 200, 200), width=2)
+
+    # 2) 범례 제목 출력
+    draw.text((box_x + 20, box_y + 15), "🏁 팀별 주행 코스 범례", fill=(30, 30, 30), font=font_large)
+    
+    # 구분선
+    draw.line([box_x + 15, box_y + 55, box_x + box_w - 15, box_y + 55], fill=(220, 220, 220), width=1)
+
+    # 3) 각 팀별 색상칩 및 현재 배정된 코스 요약 텍스트 출력
+    current_y = box_y + 70
+    for team, color in team_colors.items():
+        # 색상 컬러 박스 (네모 마커)
+        draw.rectangle([box_x + 20, current_y + 4, box_x + 42, current_y + 26], fill=color, outline=(100, 100, 100), width=1)
+        
+        # 팀 이름
+        draw.text((box_x + 55, current_y), team, fill=(20, 20, 20), font=font_medium)
+        
+        # 해당 팀이 선택한 코스 목록 가져오기
+        assigned_courses = team_assignments.get(team, [])
+        if assigned_courses:
+            course_str = ", ".join(assigned_courses)
+            # 글자가 너무 길면 말줄임 처리하거나 줄바꿈 고려 (간단히 텍스트로 표현)
+            if len(course_str) > 16:
+                course_str = course_str[:15] + "..."
+        else:
+            course_str = "미배정"
+
+        # 코스 정보 텍스트 (우측 정렬 느낌으로 배치)
+        draw.text((box_x + 150, current_y), f": {course_str}", fill=(100, 100, 100), font=font_medium)
+        
+        current_y += 42
+
+    # ─────────────────────────────────────────────
     if img_scale != 1.0:
         new_size = (int(base_width * img_scale), int(base_height * img_scale))
         current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
 
 except FileNotFoundError as e:
-    
     st.error(f"이미지 파일을 찾을 수 없습니다: {e}. 폴더 안에 파일들이 있는지 확인해주세요.")
     st.stop()
 
@@ -176,12 +233,12 @@ else:
     st.warning("⚠️ 사이드바에서 코스가 배정된 팀이 없습니다. 코스를 선택해주세요.")
 
 if np.any(overlap_tracker > 1):
-    st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색만 표시됩니다.")
+    st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색상만 표시됩니다.")
 
-# 큰 화면으로 표시 (wide 레이아웃 + 배율 슬라이더로 실질적으로 훨씬 크게 보임)
-st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판", use_container_width=True)
+# 큰 화면으로 표시
+st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판 (범례 포함)", use_container_width=True)
 
-# 원본 해상도 PNG 다운로드 버튼
+# 원본 해상도 PNG 다운로드 버튼 (범례가 포함된 상태로 다운로드됨)
 buf = io.BytesIO()
 current_canvas.save(buf, format="PNG")
 st.download_button(
