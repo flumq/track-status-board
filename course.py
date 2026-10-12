@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
-st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 배경 지도 및 도면 내 범례에 팀별 색상과 코스가 실시간으로 반영됩니다.")
+st.write("사이드바에서 각 팀이 주행할 코스를 선택하시면, 지도 내부 오버레이 범례에 실시간으로 반영됩니다.")
 
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
 team_colors = {
@@ -68,10 +68,9 @@ def load_course_mask(path: str, base_size: tuple):
     )
     return mask, img.size
 
-# 폰트 로드 함수 (시스템 폰트 활용 - 윈도우/리눅스 대응)
+# 고해상도 출력을 위한 폰트 로드 함수
 @st.cache_resource
 def get_font(size: int):
-    # 환경에 따라 적절한 고딕 폰트 지정 (윈도우: malgun.gh, 리눅스: NanumGothic 또는 기본 폰트)
     import platform
     system = platform.system()
     try:
@@ -80,9 +79,8 @@ def get_font(size: int):
         elif system == "Darwin": # Mac
             return ImageFont.truetype("AppleGothic", size)
         else: # Linux / Streamlit Cloud 등
-            return ImageFont.truetype("DejaVuSans.ttf", size)
+            return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
     except IOError:
-        # 폰트 로드 실패 시 기본 폰트 사용
         return ImageFont.load_default()
 
 # ─────────────────────────────────────────────
@@ -120,7 +118,7 @@ img_scale = st.sidebar.slider(
 )
 
 # ─────────────────────────────────────────────
-# 5. 배경 지도 + 코스 선 합성 및 범례 그리기
+# 5. 배경 지도 + 코스 선 합성 및 오버레이 범례 그리기
 # ─────────────────────────────────────────────
 try:
     canvas_arr, (base_width, base_height) = load_base_map("blank_map.png")
@@ -157,55 +155,54 @@ try:
     current_canvas = Image.fromarray(canvas_arr)
 
     # ─────────────────────────────────────────────
-    # [추가 기능] 이미지 우측 빈 공간에 인라인 범례(Legend) 그리기
+    # [개선] 지도 이미지 '내부' 우측 상단 빈 공간에 선명한 오버레이 범례 그리기
     # ─────────────────────────────────────────────
     draw = ImageDraw.Draw(current_canvas)
     
-    # 폰트 사이즈 설정 (원본 이미지 해상도 기준, 예: 24~28px 적당)
-    font_large = get_font(26)
-    font_medium = get_font(20)
+    # 해상도가 높으므로 폰트 크기를 키워서 가독성 확보 (제목 32px, 항목 24px)
+    font_title = get_font(32)
+    font_item = get_font(26)
 
-    # 범례 박스 위치 설정 (도면 우측 상단 여백 공간 기준 좌표 설정 - 필요시 x, y 조정 가능)
-    # 이미지 전체 크기(base_width, base_height)에 맞춰 우측 상단 여백에 배치
-    box_x = base_width - 360  # 우측에서 360픽셀 안쪽부터 시작
-    box_y = 50                # 상단에서 50픽셀 아래부터 시작
-    box_w = 330
-    box_h = 70 + (len(team_colors) * 45) # 팀 개수에 따라 박스 높이 자동 조절
+    # 도면 내부 우측 상단 여백에 위치하도록 좌표 재설정 (이미지 폭/높이 기준)
+    box_w = 420
+    box_h = 90 + (len(team_colors) * 52)
+    box_x = base_width - box_w - 40  # 우측 여백에서 안쪽으로 배치
+    box_y = 40                       # 상단 여백에서 배치
 
-    # 1) 반투명 혹은 흰색 배경 박스 및 테두리 그리기
-    # PIL에서 투명도를 주려면 별도 레이어를 써야 하므로 깔끔한 흰색 불투명 박스로 그립니다.
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=(255, 255, 255), outline=(200, 200, 200), width=2)
+    # 1) 가독성을 위한 깔끔한 배경 박스 및 테두리 (약간 투명한 느낌 대신 깔끔한 흰색 + 그림자 느낌 테두리)
+    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=(255, 255, 255), outline=(150, 150, 150), width=3)
 
-    # 2) 범례 제목 출력
-    draw.text((box_x + 20, box_y + 15), "🏁 팀별 주행 코스 범례", fill=(30, 30, 30), font=font_large)
+    # 2) 범례 제목
+    draw.text((box_x + 24, box_y + 20), "🏁 팀별 주행 코스 현황", fill=(20, 20, 20), font=font_title)
     
     # 구분선
-    draw.line([box_x + 15, box_y + 55, box_x + box_w - 15, box_y + 55], fill=(220, 220, 220), width=1)
+    draw.line([box_x + 20, box_y + 70, box_x + box_w - 20, box_y + 70], fill=(200, 200, 200), width=2)
 
-    # 3) 각 팀별 색상칩 및 현재 배정된 코스 요약 텍스트 출력
-    current_y = box_y + 70
+    # 3) 각 팀별 색상칩 및 코스 표시
+    current_y = box_y + 85
     for team, color in team_colors.items():
-        # 색상 컬러 박스 (네모 마커)
-        draw.rectangle([box_x + 20, current_y + 4, box_x + 42, current_y + 26], fill=color, outline=(100, 100, 100), width=1)
+        # 컬러 박스 (크기 확대)
+        draw.rectangle([box_x + 24, current_y + 6, box_x + 54, current_y + 36], fill=color, outline=(80, 80, 80), width=1)
         
         # 팀 이름
-        draw.text((box_x + 55, current_y), team, fill=(20, 20, 20), font=font_medium)
+        draw.text((box_x + 70, current_y), team, fill=(20, 20, 20), font=font_item)
         
-        # 해당 팀이 선택한 코스 목록 가져오기
+        # 해당 팀 코스 목록
         assigned_courses = team_assignments.get(team, [])
         if assigned_courses:
             course_str = ", ".join(assigned_courses)
-            # 글자가 너무 길면 말줄임 처리하거나 줄바꿈 고려 (간단히 텍스트로 표현)
-            if len(course_str) > 16:
-                course_str = course_str[:15] + "..."
+            if len(course_str) > 15:
+                course_str = course_str[:14] + "..."
         else:
             course_str = "미배정"
 
-        # 코스 정보 텍스트 (우측 정렬 느낌으로 배치)
-        draw.text((box_x + 150, current_y), f": {course_str}", fill=(100, 100, 100), font=font_medium)
+        # 코스 텍스트
+        draw.text((box_x + 180, current_y), f": {course_str}", fill=(80, 80, 80), font=font_item)
         
-        current_y += 42
+        current_y + = 52
 
+    # ─────────────────────────────────────────────
+    # 앙티알리아싱(LANCZOS)을 활용한 고해상도 리사이즈
     # ─────────────────────────────────────────────
     if img_scale != 1.0:
         new_size = (int(base_width * img_scale), int(base_height * img_scale))
@@ -235,10 +232,10 @@ else:
 if np.any(overlap_tracker > 1):
     st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색상만 표시됩니다.")
 
-# 큰 화면으로 표시
-st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판 (범례 포함)", use_container_width=True)
+# 고화질 출력을 위한 렌더링 (Streamlit 폭 맞춤 + 고품질)
+st.image(current_canvas, caption="테스트 트랙 종합 오버레이 현황판", use_container_width=True)
 
-# 원본 해상도 PNG 다운로드 버튼 (범례가 포함된 상태로 다운로드됨)
+# 원본 해상도 PNG 다운로드 버튼
 buf = io.BytesIO()
 current_canvas.save(buf, format="PNG")
 st.download_button(
