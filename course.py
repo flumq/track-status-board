@@ -170,7 +170,7 @@ fit_height = st.sidebar.slider(
 # 5. 배경 지도 + 코스 선 합성 및 범례 그리기
 # ─────────────────────────────────────────────
 try:
-    canvas_arr, (base_width, base_height) = load_base_map("blank_map.png")
+    canvas_arr, (base_width, base_height) = load_base_map("blank_map2.png")
     canvas_arr = canvas_arr.copy()
 
     active_summary = []
@@ -205,7 +205,7 @@ try:
 
     # ── 1) 지도 여백 자르기 (도면 + 아주 작은 여백) ──
     if auto_crop:
-        x0, y0, x1, y1 = find_content_bbox("blank_map.png")
+        x0, y0, x1, y1 = find_content_bbox("blank_map2.png")
         m = int(max(x1 - x0, y1 - y0) * 0.02)
         x0 = max(0, x0 - m)
         y0 = max(0, y0 - m)
