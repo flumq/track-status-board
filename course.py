@@ -4,7 +4,7 @@ import io
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
-from scipy.ndimage import binary_dilation, binary_erosion
+from scipy.ndimage import binary_dilation, binary_erosion, find_objects, label
 
 # ─────────────────────────────────────────────
 # 1. 페이지 설정
@@ -23,10 +23,10 @@ st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
 team_colors = {
     "Team 1": (0, 102, 204),        # 파란색
     "Team 2": (220, 50, 50),        # 빨간색
-    "Team 3": (255, 110, 0),   # 비비드 오렌지
+    "Team 3": (255, 110, 0),        # 비비드 오렌지
     "Team 4": (46, 139, 87),        # 초록색
     "Team 5": (138, 43, 226),       # 보라색
-    "공사 및 작업": (26, 26, 26),        # 딥차콜
+    "공사 및 작업": (26, 26, 26),    # 딥차콜
 }
 
 course_files = {
@@ -47,6 +47,8 @@ course_files = {
 }
 
 FONT_PATH = "NanumGothicBold.ttf"   # 저장소에 올린 한글 폰트 파일명
+OVERLAP_COLOR = (255, 0, 160)       # 겹침 박스 색 (마젠타)
+GLOW_COLOR = (255, 230, 0)          # 반짝일 때 후광 색 (노랑)
 
 
 # ─────────────────────────────────────────────
@@ -83,18 +85,18 @@ def find_content_bbox(path: str):
     arr, (w, h) = load_base_map(path)
     nonwhite = arr.min(axis=2) < 235
 
-    k = max(5, int(min(w, h) * 0.006))          # 이 두께보다 얇은 선은 무시
+    k = max(5, int(min(w, h) * 0.006))
     eroded = binary_erosion(nonwhite, structure=np.ones((k, 1), dtype=bool))
     eroded = binary_erosion(eroded, structure=np.ones((1, k), dtype=bool))
 
     ys, xs = np.where(eroded)
-    if len(xs) == 0:                             # 실패 시 원본 기준으로 대체
+    if len(xs) == 0:
         ys, xs = np.where(nonwhite)
         if len(xs) == 0:
             return 0, 0, w, h
         k = 0
 
-    pad = k // 2 + 1                             # 침식으로 줄어든 만큼 복원
+    pad = k // 2 + 1
     x0 = max(0, int(xs.min()) - pad)
     y0 = max(0, int(ys.min()) - pad)
     x1 = min(w, int(xs.max()) + pad + 1)
@@ -120,19 +122,47 @@ def get_font(size: int):
     return ImageFont.load_default()
 
 
+def draw_dashed_rect(draw, box, color, width=3, dash=14, gap=8):
+    """점선 사각형 그리기."""
+    x0, y0, x1, y1 = box
+
+    def hline(y, xa, xb):
+        x = xa
+        while x < xb:
+            draw.line([(x, y), (min(x + dash, xb), y)], fill=color, width=width)
+            x += dash + gap
+
+    def vline(x, ya, yb):
+        y = ya
+        while y < yb:
+            draw.line([(x, y), (x, min(y + dash, yb))], fill=color, width=width)
+            y += dash + gap
+
+    hline(y0, x0, x1)
+    hline(y1, x0, x1)
+    vline(x0, y0, y1)
+    vline(x1, y0, y1)
+
+
 # ─────────────────────────────────────────────
 # 4. 사이드바 UI
 # ─────────────────────────────────────────────
 st.sidebar.header("🚗 팀별 코스 배정 설정")
 team_assignments = {}
+blink_teams = []          # ✨ 반짝임 체크된 팀
 
 for team in team_colors.keys():
     selected = st.sidebar.multiselect(
         f"{team} 주행 코스",
         options=list(course_files.keys()),
         default=[],
+        key=f"courses_{team}",
     )
     team_assignments[team] = selected
+
+    # ✅ 팀별 체크박스: 체크하면 해당 팀의 코스가 반짝임
+    if st.sidebar.checkbox(f"✨ {team} 코스 반짝임", key=f"blink_{team}"):
+        blink_teams.append(team)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎨 팀 색상 범례")
@@ -144,6 +174,31 @@ for team, color in team_colors.items():
         f"{team}",
         unsafe_allow_html=True,
     )
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("✨ 반짝임 설정")
+blink_period = st.sidebar.slider(
+    "깜빡임 주기 (초)", min_value=0.4, max_value=3.0, value=1.0, step=0.1
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔸 겹침 표시 설정")
+show_overlap = st.sidebar.checkbox("겹치는 구간 표시", value=True)
+overlap_mode = st.sidebar.selectbox(
+    "표시 방식",
+    ["바운딩박스 + 줄무늬", "바운딩박스만", "줄무늬만"],
+    index=0,
+)
+overlap_min_px = st.sidebar.slider(
+    "겹침 최소 크기 (px)",
+    min_value=1, max_value=500, value=30, step=1,
+    help="이보다 작은 겹침(단순 교차점 등)은 무시합니다.",
+)
+overlap_merge = st.sidebar.slider(
+    "가까운 겹침 묶기 (px)",
+    min_value=0, max_value=40, value=10, step=1,
+    help="값이 클수록 가까운 겹침들이 하나의 박스로 합쳐집니다. 박스 여백 역할도 합니다.",
+)
 
 st.sidebar.markdown("---")
 thick_line = st.sidebar.checkbox(
@@ -174,11 +229,14 @@ try:
     canvas_arr = canvas_arr.copy()
 
     active_summary = []
-    overlap_tracker = np.zeros((base_height, base_width), dtype=np.uint8)
     size_error_courses = []
+
+    # 팀별 마스크 (같은 팀 내 코스 겹침은 '겹침'으로 보지 않기 위해 팀 단위로 합친다)
+    team_masks = {}
 
     for team, courses in team_assignments.items():
         team_color = team_colors[team]
+        t_mask = np.zeros((base_height, base_width), dtype=bool)
 
         for course_name in courses:
             if course_name not in course_files:
@@ -198,12 +256,78 @@ try:
             if thick_line:
                 mask = binary_dilation(mask, iterations=1)
 
-            overlap_tracker[mask] += 1
+            t_mask |= mask
             canvas_arr[mask] = team_color
 
+        if t_mask.any():
+            team_masks[team] = t_mask
+
+    # ── 겹침 계산 (서로 '다른 팀' 사이의 겹침만) ──
+    overlap_count = np.zeros((base_height, base_width), dtype=np.uint8)
+    for m in team_masks.values():
+        overlap_count += m
+    overlap = overlap_count >= 2
+
+    # 너무 작은 겹침 제거 + 박스 후보 계산
+    overlap_boxes = []        # [(x0, y0, x1, y1, [팀이름...]), ...]  (원본 좌표)
+    overlap_pairs = {}        # {("Team 1","Team 2"): 픽셀수}
+
+    if show_overlap and overlap.any():
+        # 팀 쌍별 겹침 크기 (안내 문구용)
+        names = list(team_masks.keys())
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                cnt = int((team_masks[names[i]] & team_masks[names[j]]).sum())
+                if cnt >= overlap_min_px:
+                    overlap_pairs[(names[i], names[j])] = cnt
+
+        # 가까운 겹침끼리 묶어서 박스 생성
+        merged = (
+            binary_dilation(overlap, iterations=overlap_merge)
+            if overlap_merge > 0 else overlap
+        )
+        lab, n = label(merged)
+        for idx, sl in enumerate(find_objects(lab), start=1):
+            if sl is None:
+                continue
+            region_overlap = overlap[sl] & (lab[sl] == idx)
+            if region_overlap.sum() < overlap_min_px:
+                continue
+            involved = [
+                t for t, m in team_masks.items() if (m[sl] & region_overlap).any()
+            ]
+            overlap_boxes.append(
+                (sl[1].start, sl[0].start, sl[1].stop, sl[0].stop, involved)
+            )
+
+        # 줄무늬: 겹친 픽셀을 관련 팀 색으로 번갈아 칠함
+        if overlap_mode in ("바운딩박스 + 줄무늬", "줄무늬만"):
+            ys, xs = np.nonzero(overlap)
+            n_cover = overlap_count[ys, xs].astype(int)
+            pick = ((xs + ys) // 6) % n_cover          # 픽셀별로 몇 번째 팀 색을 쓸지
+            rank = np.zeros(len(ys), dtype=int)        # 지금까지 만난 팀 수
+            for t, m in team_masks.items():
+                covered = m[ys, xs]
+                chosen = covered & (rank == pick)
+                canvas_arr[ys[chosen], xs[chosen]] = team_colors[t]
+                rank += covered
+
+    # ── ✨ 반짝임용 오버레이 (투명 PNG, 브라우저에서 CSS로 깜빡임) ──
+    overlay_arr = None
+    blink_active = [t for t in blink_teams if t in team_masks]
+    if blink_active:
+        overlay_arr = np.zeros((base_height, base_width, 4), dtype=np.uint8)
+        for t in blink_active:
+            halo = binary_dilation(team_masks[t], iterations=4)
+            overlay_arr[halo] = GLOW_COLOR + (210,)          # 노란 후광
+        for t in blink_active:
+            overlay_arr[team_masks[t]] = team_colors[t] + (255,)  # 본선
+
     current_canvas = Image.fromarray(canvas_arr)
+    overlay_img = Image.fromarray(overlay_arr, "RGBA") if overlay_arr is not None else None
 
     # ── 1) 지도 여백 자르기 (도면 + 아주 작은 여백) ──
+    crop_x0, crop_y0 = 0, 0
     if auto_crop:
         x0, y0, x1, y1 = find_content_bbox("blank_map2.png")
         m = int(max(x1 - x0, y1 - y0) * 0.02)
@@ -212,13 +336,36 @@ try:
         x1 = min(base_width, x1 + m)
         y1 = min(base_height, y1 + m)
         current_canvas = current_canvas.crop((x0, y0, x1, y1))
+        if overlay_img is not None:
+            overlay_img = overlay_img.crop((x0, y0, x1, y1))
+        crop_x0, crop_y0 = x0, y0
 
-    # ── 2) 목표 배율로 리사이즈 (범례는 이후에 그려서 선명하게 유지) ──
+    # ── 2) 목표 배율로 리사이즈 ──
     if img_scale != 1.0:
         cw, ch = current_canvas.size
-        current_canvas = current_canvas.resize(
-            (int(cw * img_scale), int(ch * img_scale)), Image.LANCZOS
-        )
+        new_size = (int(cw * img_scale), int(ch * img_scale))
+        current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
+        if overlay_img is not None:
+            overlay_img = overlay_img.resize(new_size, Image.LANCZOS)
+
+    # ── 2.5) 겹침 바운딩박스 그리기 (자르기/배율 좌표 변환 후) ──
+    if overlap_boxes and overlap_mode in ("바운딩박스 + 줄무늬", "바운딩박스만"):
+        d_box = ImageDraw.Draw(current_canvas)
+        f_box = get_font(max(12, int(current_canvas.size[0] * 0.016)))
+        lw = max(2, int(3 * img_scale))
+        for bx0, by0, bx1, by1, involved in overlap_boxes:
+            box = (
+                (bx0 - crop_x0) * img_scale,
+                (by0 - crop_y0) * img_scale,
+                (bx1 - crop_x0) * img_scale,
+                (by1 - crop_y0) * img_scale,
+            )
+            draw_dashed_rect(d_box, box, OVERLAP_COLOR, width=lw)
+            label_txt = "겹침: " + " × ".join(involved)
+            tx, ty = box[0], max(0, box[1] - f_box.size - 4)
+            tb = d_box.textbbox((tx, ty), label_txt, font=f_box)
+            d_box.rectangle(tb, fill=(255, 255, 255))
+            d_box.text((tx, ty), label_txt, fill=OVERLAP_COLOR, font=f_box)
 
     map_w, map_h = current_canvas.size
 
@@ -237,7 +384,6 @@ try:
     pad = int(unit * 0.9)
     chip = int(unit * 1.2)
 
-    # 팀 이름 중 가장 긴 폭 → 코스 열 위치 자동 결정 (겹침 방지)
     max_name_w = max(text_w(t, f_item) for t in team_colors)
     name_x_1x = pad + chip + unit * 0.6
     course_x_1x = name_x_1x + max_name_w + unit * 0.8
@@ -248,7 +394,7 @@ try:
     box_w = int(course_x_1x + course_w + pad)
     box_h = pad * 2 + int(unit * 2.4) + row_h * len(team_colors)
 
-    # ── 4) 캔버스 오른쪽에 범례 자리 확보 (지도를 가리지 않도록) ──
+    # ── 4) 캔버스 오른쪽에 범례 자리 확보 ──
     margin = int(unit * 1.0)
     if auto_crop:
         full_w = map_w + box_w + margin * 2
@@ -261,6 +407,15 @@ try:
 
     box_x = full_w - box_w - margin
     box_y = margin if legend_pos == "우상단" else full_h - box_h - margin
+
+    # 오버레이도 최종 캔버스와 같은 크기로 맞춤 (투명 여백)
+    overlay_png_b64 = None
+    if overlay_img is not None:
+        ov_full = Image.new("RGBA", (full_w, full_h), (0, 0, 0, 0))
+        ov_full.paste(overlay_img, (0, 0))
+        ov_buf = io.BytesIO()
+        ov_full.save(ov_buf, format="PNG")
+        overlay_png_b64 = base64.b64encode(ov_buf.getvalue()).decode()
 
     # ── 5) 범례 레이어 그리기 ──
     layer = Image.new("RGBA", (box_w * SS, box_h * SS), (0, 0, 0, 0))
@@ -331,14 +486,31 @@ current_canvas.save(buf, format="PNG")
 png_bytes = buf.getvalue()
 b64 = base64.b64encode(png_bytes).decode()
 
-# 도면을 먼저, 한 화면에 들어오도록 높이 제한
+# 반짝임 오버레이: 기본 이미지 위에 같은 크기로 겹쳐 CSS 애니메이션으로 깜빡임
+overlay_html = ""
+if overlay_png_b64:
+    overlay_html = (
+        f'<img src="data:image/png;base64,{overlay_png_b64}" '
+        f'style="position:absolute; left:0; top:0; width:100%; height:100%; '
+        f'pointer-events:none; animation:trackblink {blink_period}s ease-in-out infinite;">'
+    )
+
 st.markdown(
     f"""
+    <style>
+    @keyframes trackblink {{
+        0%, 100% {{ opacity: 1; }}
+        50%      {{ opacity: 0.05; }}
+    }}
+    </style>
     <div style="text-align:center;">
+      <div style="position:relative; display:inline-block; max-width:100%;">
         <img src="data:image/png;base64,{b64}"
-             style="max-width:100%; max-height:{fit_height}vh;
+             style="display:block; max-width:100%; max-height:{fit_height}vh;
                     width:auto; height:auto; object-fit:contain;
                     border:1px solid #ddd; border-radius:6px;">
+        {overlay_html}
+      </div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -353,7 +525,6 @@ st.download_button(
 
 st.markdown("---")
 
-# 안내 메시지는 도면 아래에 표시
 if size_error_courses:
     st.error(
         "⚠️ 아래 코스 이미지가 지도와 크기가 달라 표시에서 제외되었습니다. "
@@ -366,5 +537,9 @@ if active_summary:
 else:
     st.warning("⚠️ 사이드바에서 코스가 배정된 팀이 없습니다. 코스를 선택해주세요.")
 
-if np.any(overlap_tracker > 1):
-    st.warning("🔸 일부 구간이 2개 이상의 팀 코스와 겹칩니다. 화면에는 마지막으로 그려진 팀 색상만 표시됩니다.")
+if show_overlap and overlap_pairs:
+    lines = [f"- **{a} × {b}** (겹침 약 {cnt:,}px)" for (a, b), cnt in overlap_pairs.items()]
+    st.warning(
+        f"🔸 팀 간 코스 겹침이 {len(overlap_boxes)}곳에서 발견되었습니다. "
+        "지도의 점선 박스/줄무늬 구간을 확인하세요.\n\n" + "\n".join(lines)
+    )
