@@ -17,6 +17,15 @@ st.set_page_config(
 
 st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
 
+# 반짝임 체크박스 위치: "map_above" = 지도 위(제목 바로 아래), "map_below" = 지도 아래
+BLINK_POSITION = "map_above"
+if BLINK_POSITION == "map_above":
+    blink_area = st.container()
+    map_area = st.container()
+else:
+    map_area = st.container()
+    blink_area = st.container()
+
 # ─────────────────────────────────────────────
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
 # ─────────────────────────────────────────────
@@ -160,9 +169,43 @@ for team in team_colors.keys():
     )
     team_assignments[team] = selected
 
-    # ✅ 팀별 체크박스: 체크하면 해당 팀의 코스가 반짝임
-    if st.sidebar.checkbox(f"✨ {team} 코스 반짝임", key=f"blink_{team}"):
-        blink_teams.append(team)
+# ✅ 팀별 반짝임 체크박스: 사이드바가 아니라 메인 화면(blink_area)에 배치
+with blink_area:
+    st.markdown("##### ✨ 팀별 코스 반짝임 (체크한 팀의 주행 코스가 깜빡입니다)")
+    cols = st.columns(len(team_colors))
+    for col, (team, color) in zip(cols, team_colors.items()):
+        with col:
+            hex_color = "#%02x%02x%02x" % color
+            has_course = bool(team_assignments[team])
+            st.markdown(
+                f"<div style='height:6px;border-radius:3px;background:{hex_color};"
+                f"margin-bottom:4px;'></div>",
+                unsafe_allow_html=True,
+            )
+            if st.checkbox(
+                team,
+                key=f"blink_{team}",
+                disabled=not has_course,
+                help=None if has_course else "사이드바에서 코스를 먼저 배정하세요.",
+            ):
+                blink_teams.append(team)
+
+    with st.expander("⚙️ 반짝임 옵션"):
+        o1, o2, o3 = st.columns(3)
+        blink_period = o1.slider(
+            "깜빡임 주기 (초)", min_value=0.4, max_value=3.0, value=1.0, step=0.1
+        )
+        blink_mode = o2.selectbox(
+            "여러 팀 동시 선택 시",
+            ["동시에 깜빡임", "팀별로 시차를 두고 깜빡임"],
+            index=0,
+        )
+        keep_overlap_static = o3.checkbox(
+            "겹침 구간은 고정 표시",
+            value=True,
+            help="반짝이는 팀의 코스가 다른 팀과 겹치는 구간은 깜빡임에서 제외해, "
+                 "줄무늬/박스가 계속 보이게 합니다.",
+        )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎨 팀 색상 범례")
@@ -174,12 +217,6 @@ for team, color in team_colors.items():
         f"{team}",
         unsafe_allow_html=True,
     )
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("✨ 반짝임 설정")
-blink_period = st.sidebar.slider(
-    "깜빡임 주기 (초)", min_value=0.4, max_value=3.0, value=1.0, step=0.1
-)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔸 겹침 표시 설정")
@@ -313,18 +350,23 @@ try:
                 rank += covered
 
     # ── ✨ 반짝임용 오버레이 (투명 PNG, 브라우저에서 CSS로 깜빡임) ──
-    overlay_arr = None
+    #    팀마다 오버레이를 따로 만들어, 팀별로 깜빡임 타이밍을 다르게 줄 수 있게 한다.
+    overlay_imgs = {}
     blink_active = [t for t in blink_teams if t in team_masks]
-    if blink_active:
-        overlay_arr = np.zeros((base_height, base_width, 4), dtype=np.uint8)
-        for t in blink_active:
-            halo = binary_dilation(team_masks[t], iterations=4)
-            overlay_arr[halo] = GLOW_COLOR + (210,)          # 노란 후광
-        for t in blink_active:
-            overlay_arr[team_masks[t]] = team_colors[t] + (255,)  # 본선
+    for t in blink_active:
+        core = team_masks[t].copy()
+        halo = binary_dilation(core, iterations=4)
+        if keep_overlap_static:
+            # 다른 팀 코스가 있는 픽셀은 반짝임에서 제외 (겹침 줄무늬/박스 유지)
+            others = (overlap_count.astype(int) - core.astype(int)) >= 1
+            core &= ~others
+            halo &= ~others
+        arr = np.zeros((base_height, base_width, 4), dtype=np.uint8)
+        arr[halo] = GLOW_COLOR + (210,)           # 노란 후광
+        arr[core] = team_colors[t] + (255,)       # 본선
+        overlay_imgs[t] = Image.fromarray(arr, "RGBA")
 
     current_canvas = Image.fromarray(canvas_arr)
-    overlay_img = Image.fromarray(overlay_arr, "RGBA") if overlay_arr is not None else None
 
     # ── 1) 지도 여백 자르기 (도면 + 아주 작은 여백) ──
     crop_x0, crop_y0 = 0, 0
@@ -336,8 +378,8 @@ try:
         x1 = min(base_width, x1 + m)
         y1 = min(base_height, y1 + m)
         current_canvas = current_canvas.crop((x0, y0, x1, y1))
-        if overlay_img is not None:
-            overlay_img = overlay_img.crop((x0, y0, x1, y1))
+        for t in overlay_imgs:
+            overlay_imgs[t] = overlay_imgs[t].crop((x0, y0, x1, y1))
         crop_x0, crop_y0 = x0, y0
 
     # ── 2) 목표 배율로 리사이즈 ──
@@ -345,13 +387,13 @@ try:
         cw, ch = current_canvas.size
         new_size = (int(cw * img_scale), int(ch * img_scale))
         current_canvas = current_canvas.resize(new_size, Image.LANCZOS)
-        if overlay_img is not None:
-            overlay_img = overlay_img.resize(new_size, Image.LANCZOS)
+        for t in overlay_imgs:
+            overlay_imgs[t] = overlay_imgs[t].resize(new_size, Image.LANCZOS)
 
     # ── 2.5) 겹침 바운딩박스 그리기 (자르기/배율 좌표 변환 후) ──
     if overlap_boxes and overlap_mode in ("바운딩박스 + 줄무늬", "바운딩박스만"):
         d_box = ImageDraw.Draw(current_canvas)
-        f_box = get_font(max(12, int(current_canvas.size[0] * 0.016)))
+        f_box = get_font(max(14, int(current_canvas.size[0] * 0.024)))
         lw = max(2, int(3 * img_scale))
         for bx0, by0, bx1, by1, involved in overlap_boxes:
             box = (
@@ -409,13 +451,13 @@ try:
     box_y = margin if legend_pos == "우상단" else full_h - box_h - margin
 
     # 오버레이도 최종 캔버스와 같은 크기로 맞춤 (투명 여백)
-    overlay_png_b64 = None
-    if overlay_img is not None:
+    overlay_b64_list = []
+    for t, ov in overlay_imgs.items():
         ov_full = Image.new("RGBA", (full_w, full_h), (0, 0, 0, 0))
-        ov_full.paste(overlay_img, (0, 0))
+        ov_full.paste(ov, (0, 0))
         ov_buf = io.BytesIO()
         ov_full.save(ov_buf, format="PNG")
-        overlay_png_b64 = base64.b64encode(ov_buf.getvalue()).decode()
+        overlay_b64_list.append(base64.b64encode(ov_buf.getvalue()).decode())
 
     # ── 5) 범례 레이어 그리기 ──
     layer = Image.new("RGBA", (box_w * SS, box_h * SS), (0, 0, 0, 0))
@@ -488,14 +530,19 @@ b64 = base64.b64encode(png_bytes).decode()
 
 # 반짝임 오버레이: 기본 이미지 위에 같은 크기로 겹쳐 CSS 애니메이션으로 깜빡임
 overlay_html = ""
-if overlay_png_b64:
-    overlay_html = (
-        f'<img src="data:image/png;base64,{overlay_png_b64}" '
+n_ov = len(overlay_b64_list)
+for i, ov_b64 in enumerate(overlay_b64_list):
+    # 시차 모드: 팀마다 위상을 균등하게 어긋나게 한다 (음수 delay = 즉시 시작)
+    delay = -(i * blink_period / n_ov) if (blink_mode.startswith("팀별") and n_ov > 1) else 0
+    overlay_html += (
+        f'<img src="data:image/png;base64,{ov_b64}" '
         f'style="position:absolute; left:0; top:0; width:100%; height:100%; '
-        f'pointer-events:none; animation:trackblink {blink_period}s ease-in-out infinite;">'
+        f'pointer-events:none; '
+        f'animation:trackblink {blink_period}s ease-in-out {delay:.2f}s infinite;">'
     )
 
-st.markdown(
+with map_area:
+  st.markdown(
     f"""
     <style>
     @keyframes trackblink {{
@@ -514,7 +561,7 @@ st.markdown(
     </div>
     """,
     unsafe_allow_html=True,
-)
+  )
 
 st.download_button(
     label="🖼️ 현재 현황판 이미지 다운로드 (PNG)",
