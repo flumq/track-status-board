@@ -6,6 +6,11 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import binary_dilation, binary_erosion, find_objects, label
 
+try:
+    from streamlit_image_coordinates import streamlit_image_coordinates
+except ImportError:          # requirements.txt 에 streamlit-image-coordinates 추가 필요
+    streamlit_image_coordinates = None
+
 # ─────────────────────────────────────────────
 # 1. 페이지 설정
 # ─────────────────────────────────────────────
@@ -21,10 +26,12 @@ st.title("🏁 테스트 트랙 팀-코스 매칭 실시간 현황판")
 BLINK_POSITION = "map_above"
 if BLINK_POSITION == "map_above":
     blink_area = st.container()
+    draw_area = st.container()
     map_area = st.container()
 else:
     map_area = st.container()
     blink_area = st.container()
+    draw_area = st.container()
 
 # ─────────────────────────────────────────────
 # 2. 팀 리스트 및 팀별 지정 색상 (RGB)
@@ -154,6 +161,63 @@ def draw_dashed_rect(draw, box, color, width=3, dash=14, gap=8):
 
 
 # ─────────────────────────────────────────────
+# 3-2. 직접 그리기: 세션 상태, 콜백, 마스크 변환
+# ─────────────────────────────────────────────
+st.session_state.setdefault("custom_courses", [])   # [{"name","team","points"}]
+st.session_state.setdefault("draft_points", [])     # 그리는 중인 점 (원본 이미지 좌표)
+
+
+def polyline_mask(points, size, width):
+    """꺾은선 좌표(원본 이미지 좌표) → 불리언 마스크."""
+    img = Image.new("L", size, 0)
+    d = ImageDraw.Draw(img)
+    pts = [(float(x), float(y)) for x, y in points]
+    if len(pts) >= 2:
+        d.line(pts, fill=255, width=width, joint="curve")
+    r = width / 2
+    for x, y in pts:                                  # 꼭짓점을 둥글게
+        d.ellipse([x - r, y - r, x + r, y + r], fill=255)
+    return np.array(img) > 0
+
+
+def undo_point():
+    if st.session_state.draft_points:
+        st.session_state.draft_points.pop()
+
+
+def clear_draft():
+    st.session_state.draft_points = []
+
+
+def save_course():
+    pts = st.session_state.draft_points
+    if len(pts) < 2:
+        return
+    team = st.session_state.get("draw_team", list(team_colors)[0])
+    custom = st.session_state.custom_courses
+    existing = {c["name"] for c in custom} | set(course_files)
+    base = (st.session_state.get("draw_name") or "").strip() or f"직접코스 {len(custom) + 1}"
+    name, k = base, 2
+    while name in existing:
+        name, k = f"{base} ({k})", k + 1
+    custom.append({"name": name, "team": team, "points": [list(p) for p in pts]})
+    key = f"courses_{team}"                           # 해당 팀에 자동 배정
+    st.session_state[key] = list(st.session_state.get(key, [])) + [name]
+    st.session_state.draft_points = []
+    st.session_state["draw_name"] = ""
+
+
+def delete_course(name):
+    st.session_state.custom_courses = [
+        c for c in st.session_state.custom_courses if c["name"] != name
+    ]
+    for t in team_colors:                             # 팀 배정에서도 제거
+        key = f"courses_{t}"
+        if key in st.session_state:
+            st.session_state[key] = [c for c in st.session_state[key] if c != name]
+
+
+# ─────────────────────────────────────────────
 # 4. 사이드바 UI
 # ─────────────────────────────────────────────
 st.sidebar.header("🚗 팀별 코스 배정 설정")
@@ -163,8 +227,8 @@ blink_teams = []          # ✨ 반짝임 체크된 팀
 for team in team_colors.keys():
     selected = st.sidebar.multiselect(
         f"{team} 주행 코스",
-        options=list(course_files.keys()),
-        default=[],
+        options=list(course_files.keys())
+        + [c["name"] for c in st.session_state.custom_courses],
         key=f"courses_{team}",
     )
     team_assignments[team] = selected
@@ -207,6 +271,48 @@ with blink_area:
                  "줄무늬/박스가 계속 보이게 합니다.",
         )
 
+# ✏️ 코스 직접 그리기 UI (메인 화면)
+with draw_area:
+    draw_mode = st.toggle(
+        "✏️ 코스 직접 그리기 모드",
+        key="draw_mode",
+        help="켜면 지도 위를 클릭해 꺾은선 코스를 그릴 수 있습니다. (이 동안 반짝임은 일시 정지)",
+    )
+    if draw_mode:
+        c1, c2, c3 = st.columns([1.2, 1.8, 1.2])
+        c1.selectbox("그릴 팀", list(team_colors.keys()), key="draw_team")
+        c2.text_input(
+            "코스 이름",
+            key="draw_name",
+            placeholder=f"비워두면 '직접코스 {len(st.session_state.custom_courses) + 1}'",
+        )
+        draw_width = c3.slider("그리기 화면 폭(px)", 600, 1800, 1100, step=50)
+
+        b1, b2, b3 = st.columns(3)
+        b1.button("↩️ 마지막 점 취소", on_click=undo_point, use_container_width=True)
+        b2.button("🗑️ 점 모두 지우기", on_click=clear_draft, use_container_width=True)
+        b3.button(
+            "✅ 코스 저장",
+            on_click=save_course,
+            type="primary",
+            disabled=len(st.session_state.draft_points) < 2,
+            use_container_width=True,
+        )
+        st.caption(
+            f"지도를 클릭해 점을 찍으면 순서대로 선으로 이어집니다. "
+            f"현재 {len(st.session_state.draft_points)}개 점 · 2개 이상이면 저장할 수 있고, "
+            "저장하면 선택한 팀에 자동 배정됩니다."
+        )
+    else:
+        draw_width = 1100
+
+    if st.session_state.custom_courses:
+        with st.expander(f"📋 직접 그린 코스 ({len(st.session_state.custom_courses)})"):
+            for i, c in enumerate(st.session_state.custom_courses):
+                r1, r2 = st.columns([5, 1])
+                r1.markdown(f"**{c['name']}** · {c['team']} · {len(c['points'])}개 점")
+                r2.button("삭제", key=f"del_custom_{i}", on_click=delete_course, args=(c["name"],))
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎨 팀 색상 범례")
 for team, color in team_colors.items():
@@ -241,6 +347,10 @@ st.sidebar.markdown("---")
 thick_line = st.sidebar.checkbox(
     "선 두껍게 표시 (확대 시 가독성 향상)", value=True
 )
+custom_line_w = st.sidebar.slider(
+    "직접 그린 선 굵기 (원본 px)", min_value=2, max_value=30, value=8, step=1,
+    help="직접 그린 코스의 선 굵기입니다. 기존 코스 선과 비슷하게 맞춰보세요.",
+)
 auto_crop = st.sidebar.checkbox(
     "지도 여백 자동 자르기 (지도 크게 보기)", value=True
 )
@@ -270,12 +380,24 @@ try:
 
     # 팀별 마스크 (같은 팀 내 코스 겹침은 '겹침'으로 보지 않기 위해 팀 단위로 합친다)
     team_masks = {}
+    custom_map = {c["name"]: c for c in st.session_state.custom_courses}
 
     for team, courses in team_assignments.items():
         team_color = team_colors[team]
         t_mask = np.zeros((base_height, base_width), dtype=bool)
 
         for course_name in courses:
+            if course_name in custom_map:             # ✏️ 직접 그린 코스
+                mask = polyline_mask(
+                    custom_map[course_name]["points"],
+                    (base_width, base_height),
+                    custom_line_w,
+                )
+                active_summary.append(f"**{team}**: {course_name}")
+                t_mask |= mask
+                canvas_arr[mask] = team_color
+                continue
+
             if course_name not in course_files:
                 continue
 
@@ -542,7 +664,49 @@ for i, ov_b64 in enumerate(overlay_b64_list):
     )
 
 with map_area:
-  st.markdown(
+  if draw_mode:
+    if streamlit_image_coordinates is None:
+        st.error(
+            "그리기 기능에는 `streamlit-image-coordinates` 패키지가 필요합니다. "
+            "requirements.txt 에 추가한 뒤 다시 배포해주세요."
+        )
+    else:
+        # 그리는 중인 꺾은선을 미리보기로 얹은 이미지를 클릭 가능한 형태로 표시
+        draw_img = current_canvas.copy()
+        dd = ImageDraw.Draw(draw_img)
+        dcol = team_colors[st.session_state.get("draw_team", list(team_colors)[0])]
+        lw = max(3, int(custom_line_w * img_scale))
+        pts_c = [
+            ((x - crop_x0) * img_scale, (y - crop_y0) * img_scale)
+            for x, y in st.session_state.draft_points
+        ]
+        if len(pts_c) >= 2:
+            dd.line(pts_c, fill=(255, 255, 255), width=lw + 4, joint="curve")
+            dd.line(pts_c, fill=dcol, width=lw, joint="curve")
+        f_pt = get_font(max(12, lw * 2))
+        r = max(5, lw)
+        for i, (px, py) in enumerate(pts_c, start=1):
+            dd.ellipse([px - r, py - r, px + r, py + r],
+                       fill=(255, 255, 255), outline=dcol, width=2)
+            dd.text((px + r + 2, py - r - 2), str(i), fill=(20, 20, 20), font=f_pt)
+
+        click = streamlit_image_coordinates(
+            draw_img,
+            width=min(draw_width, draw_img.size[0]),
+            key="draw_canvas",
+        )
+        if click and click.get("unix_time") != st.session_state.get("last_click_time"):
+            st.session_state["last_click_time"] = click["unix_time"]
+            # 표시 크기 → 합성 캔버스 좌표 → 지도 좌표 → 원본 이미지 좌표
+            cx = click["x"] * draw_img.size[0] / click["width"]
+            cy = click["y"] * draw_img.size[1] / click["height"]
+            if cx < map_w and cy < map_h:             # 범례/여백 클릭은 무시
+                ox = min(max(cx / img_scale + crop_x0, 0), base_width - 1)
+                oy = min(max(cy / img_scale + crop_y0, 0), base_height - 1)
+                st.session_state.draft_points.append([round(ox, 1), round(oy, 1)])
+                st.rerun()
+  else:
+    st.markdown(
     f"""
     <style>
     @keyframes trackblink {{
